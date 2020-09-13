@@ -41,25 +41,6 @@ async function promptForRepoOwner() {
 }
 
 
-function promiseAllIterativeOrFailureObject(promises) {
-    return new Promise((resolve, reject) => {
-        let results = [];
-        let completed = 0;
-       
-        const handleResult = (result, index) => {
-            results[index] = result;
-            completed += 1;
-
-            if (completed == promises.length) {
-                resolve(results);
-            }
-        }
-
-        promises.forEach((promise, index) => {
-            Promise.resolve(promise).then((r) => handleResult(r, index)).catch((e) => handleResult({fail: true}, index));
-        });
-    });
-}
 
 const sortReposByUpdatedDate = (a, b) => {
     let ad = new Date(a.updated_at);
@@ -87,13 +68,14 @@ const sortRepoListByCommitDate = (a, b) => {
 };
 
 async function getMostRecentCommitDateForRepo(octokit, repo) {
-    const { data: commits } = await octokit.repos.listCommits({
-        owner: repo.owner.login,
-        repo: repo.name,
-    });
-    commits.sort(sortCommitsByComiteerDate);
+    try {
+        const { data: commits } = await octokit.repos.listCommits(repo);
+        commits.sort(sortCommitsByComiteerDate);
 
-    return { repo: repo.name, owner: repo.owner.login, lastCommitDate: new Date(commits[0].committer.date) };
+        return { repo: repo.repo, owner: repo.owner, lastCommitDate: new Date(commits[0].commit.committer.date) };
+    } catch(e) {
+        return { error: true }
+    }
 }
 
 
@@ -102,9 +84,14 @@ async function getAllReposWithSameName(octokit, repo) {
     let allReposFound = [];
     let repos = [];
     do {
-        const { data: { items: repos }} = await octokit.search.repos({q: `${repo} in:name`, per_page: 100})
-        allReposFound = allReposFound.concat(repos);
-        page += 1;
+        try {
+            const { data: { items: repos }} = await octokit.search.repos({q: `${repo} in:name`, per_page: 100})
+            allReposFound = allReposFound.concat(repos);
+            page += 1;
+        } catch(e) {
+            console.log("Error searching repos. Exiting");
+            process.exit(1);
+        }
     } while(repos.length > 0);
 
     // Only return repos with an exact match on the name
@@ -122,7 +109,11 @@ async function main() {
     let listOwnerRepo = [];
 
     var { data: baseRepo } = await octokit.repos.get({ owner, repo });
-    const baseRepoNewestCommit = await getMostRecentCommitDateForRepo(octokit, baseRepo);
+    const baseRepoNewestCommit = await getMostRecentCommitDateForRepo(octokit, { owner: baseRepo.owner.login, repo: baseRepo.name  });
+    if (baseRepoNewestCommit.error) {
+        console.log("An error occurred getting the original repo's commits. Exiting");
+        process.exit(1);
+    }
 
     var { data: forks } = await octokit.repos.listForks({ owner, repo });
     
@@ -137,11 +128,12 @@ async function main() {
 
     const lastCommitForEachRepoPromises = listOwnerRepo.map(r => getMostRecentCommitDateForRepo(octokit, r));
     const lastCommitForEachRepo = await Promise.all(lastCommitForEachRepoPromises);
+    const lastCommitForEachRepoFiltered = lastCommitForEachRepo.filter(r => !r.error);
 
-    lastCommitForEachRepo.sort(sortRepoListByCommitDate);
+    lastCommitForEachRepoFiltered.sort(sortRepoListByCommitDate);
 
-    console.log("Sorted list of repositories by the last commit date:");
-    lastCommitForEachRepo.forEach(r => {
+    console.log("\nSorted list of repositories by the last commit date:\n");
+    lastCommitForEachRepoFiltered.forEach(r => {
         console.log(`${chalk.blue(r.owner)} / ${chalk.green(r.repo)} - last commit date: ${chalk.red(r.lastCommitDate.toString())}`);
     });
     
